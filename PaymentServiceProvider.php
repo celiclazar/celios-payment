@@ -3,6 +3,7 @@
 namespace Modules\Payment;
 
 use Illuminate\Support\ServiceProvider;
+use Modules\Payment\Console\Commands\TestPaymentCommand;
 use Modules\Payment\Services\PaymentManager;
 use Modules\Payment\Services\PaymentService;
 
@@ -31,7 +32,7 @@ class PaymentServiceProvider extends ServiceProvider
             ], 'payment-config');
 
             $this->commands([
-                \Modules\Payment\Console\Commands\TestPaymentCommand::class,
+                TestPaymentCommand::class,
             ]);
         }
 

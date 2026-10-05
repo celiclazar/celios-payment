@@ -3,6 +3,7 @@
 namespace Modules\Payment\Filament\Resources;
 
 use BackedEnum;
+use Celios\Core\Filament\Traits\HasModuleToggle;
 use Filament\Actions\Action;
 use Filament\Actions\ViewAction;
 use Filament\Forms\Components\TextInput;
@@ -18,7 +19,6 @@ use Modules\Payment\Enums\PaymentStatus;
 use Modules\Payment\Facades\Payment as PaymentFacade;
 use Modules\Payment\Filament\Resources\PaymentResource\Pages\ListPayments;
 use Modules\Payment\Filament\Resources\PaymentResource\Pages\ViewPayment;
-use Celios\Core\Filament\Traits\HasModuleToggle;
 use Modules\Payment\Models\Payment;
 
 class PaymentResource extends Resource

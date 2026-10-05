@@ -63,7 +63,7 @@ class TestPaymentCommand extends Command
                 ]
             );
 
-            if (!empty($response->actionData)) {
+            if (! empty($response->actionData)) {
                 $this->newLine();
                 $this->line('<fg=yellow;options=bold>Next Step / Action Instructions:</>');
                 foreach ($response->actionData as $key => $value) {
@@ -73,7 +73,7 @@ class TestPaymentCommand extends Command
             }
 
             $this->newLine();
-            $this->line("Check this record in the admin panel at: <fg=green>/admin/payments</>");
+            $this->line('Check this record in the admin panel at: <fg=green>/admin/payments</>');
 
             return Command::SUCCESS;
         } catch (\Throwable $e) {

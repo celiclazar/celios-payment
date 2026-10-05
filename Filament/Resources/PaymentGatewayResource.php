@@ -3,6 +3,7 @@
 namespace Modules\Payment\Filament\Resources;
 
 use BackedEnum;
+use Celios\Core\Filament\Traits\HasModuleToggle;
 use Filament\Actions\EditAction;
 use Filament\Forms\Components\KeyValue;
 use Filament\Forms\Components\TagsInput;
@@ -19,7 +20,6 @@ use Filament\Tables\Table;
 use Modules\Payment\Filament\Resources\PaymentGatewayResource\Pages\CreatePaymentGateway;
 use Modules\Payment\Filament\Resources\PaymentGatewayResource\Pages\EditPaymentGateway;
 use Modules\Payment\Filament\Resources\PaymentGatewayResource\Pages\ListPaymentGateways;
-use Celios\Core\Filament\Traits\HasModuleToggle;
 use Modules\Payment\Models\PaymentGatewayConfig;
 
 class PaymentGatewayResource extends Resource
