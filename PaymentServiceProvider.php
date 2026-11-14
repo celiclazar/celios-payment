@@ -45,5 +45,8 @@ class PaymentServiceProvider extends ServiceProvider
         if (file_exists(__DIR__.'/Resources/lang')) {
             $this->loadTranslationsFrom(__DIR__.'/Resources/lang', 'payment');
         }
+
+        \Illuminate\Support\Facades\Gate::policy(\Modules\Payment\Models\Payment::class, \Modules\Payment\Policies\PaymentPolicy::class);
+        \Illuminate\Support\Facades\Gate::policy(\Modules\Payment\Models\PaymentGatewayConfig::class, \Modules\Payment\Policies\PaymentGatewayConfigPolicy::class);
     }
 }
