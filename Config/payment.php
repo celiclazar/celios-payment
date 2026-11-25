@@ -28,6 +28,28 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | REST API Checkout Policy
+    |--------------------------------------------------------------------------
+    |
+    | By default, POST /api/v1/payments/checkout requires an authenticated
+    | Sanctum user. Set PAYMENT_ALLOW_GUEST_CHECKOUT=true only when intentionally
+    | supporting unauthenticated guest checkouts.
+    |
+    */
+    'api' => [
+        'allow_guest_checkout' => (bool) env('PAYMENT_ALLOW_GUEST_CHECKOUT', false),
+        'max_checkout_amount' => (float) env('PAYMENT_MAX_CHECKOUT_AMOUNT', 100000),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Allowed Offsite Redirect Return / Cancel Hosts
+    |--------------------------------------------------------------------------
+    */
+    'allowed_redirect_hosts' => [],
+
+    /*
+    |--------------------------------------------------------------------------
     | Payment Gateways Configuration
     |--------------------------------------------------------------------------
     |

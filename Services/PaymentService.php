@@ -5,6 +5,7 @@ namespace Modules\Payment\Services;
 use Exception;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
 use Modules\Payment\Contracts\AuthorizableGatewayInterface;
 use Modules\Payment\Contracts\InquirableGatewayInterface;
@@ -144,49 +145,51 @@ class PaymentService
      */
     public function refund(Payment|string $payment, float $amount, ?string $reason = null): RefundResponse
     {
-        $payment = is_string($payment)
-            ? Payment::where('reference', $payment)->orWhere('uuid', $payment)->firstOrFail()
-            : $payment;
+        return DB::transaction(function () use ($payment, $amount, $reason): RefundResponse {
+            $lockedPayment = is_string($payment)
+                ? Payment::where('reference', $payment)->orWhere('uuid', $payment)->lockForUpdate()->firstOrFail()
+                : Payment::whereKey($payment->getKey())->lockForUpdate()->firstOrFail();
 
-        if (! $payment->isPaid() && ! $payment->isRefunded()) {
-            throw new PaymentException("Cannot refund a payment with status [{$payment->status->value}].");
-        }
+            if (! $lockedPayment->isPaid() && ! $lockedPayment->isRefunded()) {
+                throw new PaymentException("Cannot refund a payment with status [{$lockedPayment->status->value}].");
+            }
 
-        $remainingAmount = $payment->getRemainingRefundableAmount();
-        if ($amount > $remainingAmount) {
-            throw new PaymentException("Refund amount ({$amount}) exceeds remaining refundable amount ({$remainingAmount}).");
-        }
+            $remainingAmount = $lockedPayment->getRemainingRefundableAmount();
+            if ($amount > $remainingAmount) {
+                throw new PaymentException("Refund amount ({$amount}) exceeds remaining refundable amount ({$remainingAmount}).");
+            }
 
-        $driver = $this->gateway($payment->gateway);
+            $driver = $this->gateway($lockedPayment->gateway);
 
-        if (! $driver instanceof RefundableGatewayInterface) {
-            throw UnsupportedOperationException::forOperation($payment->gateway, 'refund');
-        }
+            if (! $driver instanceof RefundableGatewayInterface) {
+                throw UnsupportedOperationException::forOperation($lockedPayment->gateway, 'refund');
+            }
 
-        $refundRequest = RefundRequest::make($payment->gateway_transaction_id ?: $payment->reference, $amount)
-            ->withCurrency($payment->currency)
-            ->withReason($reason ?? 'Customer requested refund')
-            ->withMetadata(['payment_reference' => $payment->reference]);
+            $refundRequest = RefundRequest::make($lockedPayment->gateway_transaction_id ?: $lockedPayment->reference, $amount)
+                ->withCurrency($lockedPayment->currency)
+                ->withReason($reason ?? 'requested_by_customer')
+                ->withMetadata(['payment_reference' => $lockedPayment->reference]);
 
-        $response = $driver->refund($refundRequest);
+            $response = $driver->refund($refundRequest);
 
-        PaymentTransaction::create([
-            'payment_id' => $payment->id,
-            'type' => TransactionType::REFUND,
-            'gateway_reference' => $response->refundId,
-            'amount' => $amount,
-            'currency' => $payment->currency,
-            'status' => $response->isSuccessful ? 'success' : 'failed',
-            'payload' => $response->raw,
-            'error_message' => $response->errorMessage,
-        ]);
+            PaymentTransaction::create([
+                'payment_id' => $lockedPayment->id,
+                'type' => TransactionType::REFUND,
+                'gateway_reference' => $response->refundId,
+                'amount' => $amount,
+                'currency' => $lockedPayment->currency,
+                'status' => $response->isSuccessful ? 'success' : 'failed',
+                'payload' => $response->raw,
+                'error_message' => $response->errorMessage,
+            ]);
 
-        if ($response->isSuccessful) {
-            $payment->markAsRefunded($amount);
-            event(new PaymentRefunded($payment, $amount, $response));
-        }
+            if ($response->isSuccessful) {
+                $lockedPayment->markAsRefunded($amount);
+                event(new PaymentRefunded($lockedPayment, $amount, $response));
+            }
 
-        return $response;
+            return $response;
+        });
     }
 
     /**
@@ -316,21 +319,47 @@ class PaymentService
 
         $result = $driver->processWebhook($request);
 
+        $eventId = $result->eventId
+            ?? (is_string($result->payload['id'] ?? null) ? $result->payload['id'] : null);
+
+        // Enforce idempotency when gateway supplies a unique webhook event ID
+        if ($eventId !== null && Schema::hasTable('payment_webhook_events')) {
+            $inserted = DB::table('payment_webhook_events')->insertOrIgnore([
+                'gateway' => $gateway,
+                'event_id' => $eventId,
+                'event_type' => $result->eventType,
+                'processed_at' => now(),
+            ]);
+
+            if ($inserted === 0) {
+                return WebhookResult::ignored(
+                    eventType: $result->eventType,
+                    message: "Duplicate webhook event [{$eventId}] already processed",
+                    payload: $result->payload,
+                    eventId: $eventId,
+                );
+            }
+        }
+
         event(new PaymentWebhookReceived($gateway, $request, $result));
 
-        // If the webhook matched a payment and gave a new status, update it
+        // If the webhook matched a payment and gave a new status, update it atomically under row lock
         if ($result->isHandled && $result->newStatus) {
-            $payment = null;
+            DB::transaction(function () use ($result): void {
+                $payment = null;
 
-            if ($result->paymentReference) {
-                $payment = Payment::where('reference', $result->paymentReference)->first();
-            }
+                if ($result->paymentReference) {
+                    $payment = Payment::where('reference', $result->paymentReference)->lockForUpdate()->first();
+                }
 
-            if (! $payment && $result->gatewayTransactionId) {
-                $payment = Payment::where('gateway_transaction_id', $result->gatewayTransactionId)->first();
-            }
+                if (! $payment && $result->gatewayTransactionId) {
+                    $payment = Payment::where('gateway_transaction_id', $result->gatewayTransactionId)->lockForUpdate()->first();
+                }
 
-            if ($payment) {
+                if (! $payment) {
+                    return;
+                }
+
                 PaymentTransaction::create([
                     'payment_id' => $payment->id,
                     'type' => TransactionType::WEBHOOK,
@@ -344,15 +373,15 @@ class PaymentService
                 if ($result->newStatus === PaymentStatus::PAID && ! $payment->isPaid()) {
                     $payment->markAsPaid($result->gatewayTransactionId, $result->payload);
                     event(new PaymentSucceeded($payment));
-                } elseif ($result->newStatus === PaymentStatus::FAILED) {
+                } elseif ($result->newStatus === PaymentStatus::FAILED && ! $payment->isPaid()) {
                     $payment->markAsFailed($result->message ?? 'Failed via webhook', $result->gatewayTransactionId, $result->payload);
                     event(new PaymentFailed($payment));
                 } elseif ($result->newStatus === PaymentStatus::REFUNDED && ! $payment->isRefunded()) {
                     $payment->markAsRefunded($result->amount ?? (float) $payment->amount);
-                } else {
+                } elseif (! $payment->isPaid()) {
                     $payment->update(['status' => $result->newStatus]);
                 }
-            }
+            });
         }
 
         return $result;

@@ -21,6 +21,22 @@ class StripeGateway extends AbstractGateway implements InquirableGatewayInterfac
 {
     protected string $baseUrl = 'https://api.stripe.com/v1';
 
+    /**
+     * Currencies where Stripe expects whole major units (no *100 multiplier).
+     *
+     * @var array<int, string>
+     */
+    protected const ZERO_DECIMAL_CURRENCIES = [
+        'BIF', 'CLP', 'DJF', 'GNF', 'JPY', 'KMF', 'KRW', 'MGA',
+        'PYG', 'RWF', 'UGX', 'VND', 'VUV', 'XAF', 'XOF', 'XPF',
+    ];
+
+    protected const ALLOWED_REFUND_REASONS = [
+        'duplicate',
+        'fraudulent',
+        'requested_by_customer',
+    ];
+
     public function getId(): string
     {
         return 'stripe';
@@ -38,12 +54,53 @@ class StripeGateway extends AbstractGateway implements InquirableGatewayInterfac
 
     protected function getSecretKey(): ?string
     {
-        return $this->config('secret_key', env('STRIPE_SECRET_KEY'));
+        return $this->config('secret_key', config('payment.gateways.stripe.secret_key'));
     }
 
     protected function getWebhookSecret(): ?string
     {
-        return $this->config('webhook_secret', env('STRIPE_WEBHOOK_SECRET'));
+        return $this->config('webhook_secret', config('payment.gateways.stripe.webhook_secret'));
+    }
+
+    protected function toSmallestUnit(float $amount, string $currency): int
+    {
+        if (in_array(strtoupper($currency), self::ZERO_DECIMAL_CURRENCIES, true)) {
+            return (int) round($amount);
+        }
+
+        return (int) round($amount * 100);
+    }
+
+    protected function fromSmallestUnit(int|float $amount, string $currency): float
+    {
+        if (in_array(strtoupper($currency), self::ZERO_DECIMAL_CURRENCIES, true)) {
+            return (float) $amount;
+        }
+
+        return ((float) $amount) / 100;
+    }
+
+    protected function mapRefundReason(?string $reason): ?string
+    {
+        if ($reason === null || trim($reason) === '') {
+            return null;
+        }
+
+        $normalized = strtolower(trim($reason));
+
+        if (in_array($normalized, self::ALLOWED_REFUND_REASONS, true)) {
+            return $normalized;
+        }
+
+        if (str_contains($normalized, 'duplicate')) {
+            return 'duplicate';
+        }
+
+        if (str_contains($normalized, 'fraud')) {
+            return 'fraudulent';
+        }
+
+        return 'requested_by_customer';
     }
 
     public function charge(PaymentChargeRequest $request): PaymentResponse
@@ -54,11 +111,10 @@ class StripeGateway extends AbstractGateway implements InquirableGatewayInterfac
             return PaymentResponse::failed('Stripe secret key is not configured.');
         }
 
-        // Amount in cents / smallest currency unit
-        $amountInCents = (int) round($request->amount * 100);
+        $amountInSmallestUnit = $this->toSmallestUnit($request->amount, $request->currency);
 
         $params = [
-            'amount' => $amountInCents,
+            'amount' => $amountInSmallestUnit,
             'currency' => strtolower($request->currency),
             'description' => $request->description ?? "Payment for {$request->reference}",
             'metadata' => array_merge([
@@ -148,14 +204,20 @@ class StripeGateway extends AbstractGateway implements InquirableGatewayInterfac
             return RefundResponse::failed('Stripe secret key is not configured.');
         }
 
+        $metadata = $request->metadata;
+        if ($request->reason) {
+            $metadata['refund_reason_note'] = $request->reason;
+        }
+
         $params = [
             'payment_intent' => $request->gatewayTransactionId,
-            'amount' => (int) round($request->amount * 100),
-            'metadata' => $request->metadata,
+            'amount' => $this->toSmallestUnit($request->amount, $request->currency ?? 'EUR'),
+            'metadata' => $metadata,
         ];
 
-        if ($request->reason) {
-            $params['reason'] = $request->reason;
+        $mappedReason = $this->mapRefundReason($request->reason);
+        if ($mappedReason !== null) {
+            $params['reason'] = $mappedReason;
         }
 
         try {
@@ -188,8 +250,9 @@ class StripeGateway extends AbstractGateway implements InquirableGatewayInterfac
     {
         $webhookSecret = $this->getWebhookSecret();
 
+        // Always fail closed if webhook secret is not configured
         if (empty($webhookSecret)) {
-            return true; // If no secret is configured in dev, skip verification
+            return false;
         }
 
         $sigHeader = $request->header('Stripe-Signature');
@@ -199,7 +262,7 @@ class StripeGateway extends AbstractGateway implements InquirableGatewayInterfac
 
         $payload = $request->getContent();
         $timestamp = null;
-        $signature = null;
+        $signatures = [];
 
         foreach (explode(',', $sigHeader) as $part) {
             $item = explode('=', trim($part), 2);
@@ -207,13 +270,13 @@ class StripeGateway extends AbstractGateway implements InquirableGatewayInterfac
                 if ($item[0] === 't') {
                     $timestamp = $item[1];
                 }
-                if ($item[0] === 'v1') {
-                    $signature = $item[1];
+                if ($item[0] === 'v1' && $item[1] !== '') {
+                    $signatures[] = $item[1];
                 }
             }
         }
 
-        if (! $timestamp || ! $signature) {
+        if (! $timestamp || ! ctype_digit($timestamp) || empty($signatures)) {
             return false;
         }
 
@@ -225,19 +288,26 @@ class StripeGateway extends AbstractGateway implements InquirableGatewayInterfac
         $signedPayload = "{$timestamp}.{$payload}";
         $expectedSignature = hash_hmac('sha256', $signedPayload, $webhookSecret);
 
-        return hash_equals($expectedSignature, $signature);
+        foreach ($signatures as $signature) {
+            if (hash_equals($expectedSignature, $signature)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     public function processWebhook(Request $request): WebhookResult
     {
         $data = $request->all();
+        $eventId = isset($data['id']) && is_string($data['id']) ? $data['id'] : null;
         $eventType = $data['type'] ?? 'unknown';
         $object = $data['data']['object'] ?? [];
 
         $txId = $object['id'] ?? null;
         $reference = $object['metadata']['payment_reference'] ?? null;
-        $amount = isset($object['amount']) ? ((float) $object['amount']) / 100 : null;
         $currency = isset($object['currency']) ? strtoupper($object['currency']) : null;
+        $amount = isset($object['amount']) ? $this->fromSmallestUnit((float) $object['amount'], $currency ?? 'EUR') : null;
 
         return match ($eventType) {
             'payment_intent.succeeded' => WebhookResult::handled(
@@ -248,7 +318,8 @@ class StripeGateway extends AbstractGateway implements InquirableGatewayInterfac
                 amount: $amount,
                 currency: $currency,
                 payload: $data,
-                message: 'Stripe payment succeeded'
+                message: 'Stripe payment succeeded',
+                eventId: $eventId,
             ),
             'payment_intent.payment_failed' => WebhookResult::handled(
                 eventType: $eventType,
@@ -258,22 +329,25 @@ class StripeGateway extends AbstractGateway implements InquirableGatewayInterfac
                 amount: $amount,
                 currency: $currency,
                 payload: $data,
-                message: $object['last_payment_error']['message'] ?? 'Stripe payment failed'
+                message: $object['last_payment_error']['message'] ?? 'Stripe payment failed',
+                eventId: $eventId,
             ),
             'charge.refunded' => WebhookResult::handled(
                 eventType: $eventType,
                 gatewayTransactionId: $object['payment_intent'] ?? $txId,
                 paymentReference: $reference,
                 newStatus: PaymentStatus::REFUNDED,
-                amount: isset($object['amount_refunded']) ? ((float) $object['amount_refunded']) / 100 : null,
+                amount: isset($object['amount_refunded']) ? $this->fromSmallestUnit((float) $object['amount_refunded'], $currency ?? 'EUR') : null,
                 currency: $currency,
                 payload: $data,
-                message: 'Stripe charge refunded'
+                message: 'Stripe charge refunded',
+                eventId: $eventId,
             ),
             default => WebhookResult::ignored(
                 eventType: $eventType,
                 message: "Stripe event [{$eventType}] ignored",
-                payload: $data
+                payload: $data,
+                eventId: $eventId,
             )
         };
     }
@@ -307,12 +381,14 @@ class StripeGateway extends AbstractGateway implements InquirableGatewayInterfac
                 default => PaymentStatus::PENDING,
             };
 
+            $currency = strtoupper($data['currency'] ?? 'EUR');
+
             return new PaymentResponse(
                 status: $status,
                 transactionId: $data['id'],
                 reference: $data['metadata']['payment_reference'] ?? null,
-                amount: ((float) ($data['amount'] ?? 0)) / 100,
-                currency: strtoupper($data['currency'] ?? 'EUR'),
+                amount: $this->fromSmallestUnit((float) ($data['amount'] ?? 0), $currency),
+                currency: $currency,
                 raw: $data
             );
         } catch (Exception $e) {

@@ -15,6 +15,7 @@ use Filament\Schemas\Schema;
 use Filament\Tables\Columns\TextColumn;
 use Filament\Tables\Filters\SelectFilter;
 use Filament\Tables\Table;
+use Illuminate\Support\Facades\Gate;
 use Modules\Payment\Enums\PaymentStatus;
 use Modules\Payment\Facades\Payment as PaymentFacade;
 use Modules\Payment\Filament\Resources\PaymentResource\Pages\ListPayments;
@@ -52,7 +53,7 @@ class PaymentResource extends Resource
 
                         Placeholder::make('gateway')
                             ->label('Gateway')
-                            ->content(fn (?Payment $record) => strtoupper($record?->gateway ?? '')),
+                            ->content(fn (?Payment $record) => strtoupper((string) ($record ? $record->gateway : ''))),
 
                         Placeholder::make('gateway_transaction_id')
                             ->label('Gateway Transaction ID')
@@ -92,7 +93,7 @@ class PaymentResource extends Resource
 
                         Placeholder::make('error_message')
                             ->label('Error Message')
-                            ->visible(fn (?Payment $record) => ! empty($record?->error_message))
+                            ->visible(fn (?Payment $record) => $record !== null && ! empty($record->error_message))
                             ->content(fn (?Payment $record) => $record?->error_message),
                     ]),
 
@@ -180,9 +181,12 @@ class PaymentResource extends Resource
                     ->label('Mark Paid')
                     ->icon('heroicon-o-check-circle')
                     ->color('success')
-                    ->visible(fn (Payment $record) => $record->status === PaymentStatus::PENDING)
+                    ->authorize('update')
+                    ->visible(fn (Payment $record) => $record->status === PaymentStatus::PENDING && Gate::allows('update', $record))
                     ->requiresConfirmation()
                     ->action(function (Payment $record) {
+                        abort_unless(Gate::allows('update', $record), 403);
+
                         $record->markAsPaid('manual_'.time());
                         Notification::make()
                             ->title('Payment marked as paid successfully')
@@ -194,7 +198,8 @@ class PaymentResource extends Resource
                     ->label('Refund')
                     ->icon('heroicon-o-arrow-uturn-left')
                     ->color('danger')
-                    ->visible(fn (Payment $record) => $record->canBeRefunded())
+                    ->authorize('update')
+                    ->visible(fn (Payment $record) => $record->canBeRefunded() && Gate::allows('update', $record))
                     ->schema([
                         TextInput::make('amount')
                             ->label('Refund Amount')
@@ -207,6 +212,8 @@ class PaymentResource extends Resource
                             ->placeholder('e.g. Customer return'),
                     ])
                     ->action(function (Payment $record, array $data) {
+                        abort_unless(Gate::allows('update', $record), 403);
+
                         try {
                             $response = PaymentFacade::refund($record, (float) $data['amount'], $data['reason'] ?? null);
                             if ($response->isSuccessful) {

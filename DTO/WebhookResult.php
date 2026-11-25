@@ -16,6 +16,7 @@ class WebhookResult
         public readonly ?string $currency = null,
         public readonly ?string $message = null,
         public readonly array $payload = [],
+        public readonly ?string $eventId = null,
     ) {}
 
     public static function handled(
@@ -26,7 +27,8 @@ class WebhookResult
         ?float $amount = null,
         ?string $currency = null,
         array $payload = [],
-        ?string $message = 'Webhook processed'
+        ?string $message = 'Webhook processed',
+        ?string $eventId = null,
     ): self {
         return new self(
             isHandled: true,
@@ -38,26 +40,29 @@ class WebhookResult
             currency: $currency,
             message: $message,
             payload: $payload,
+            eventId: $eventId,
         );
     }
 
-    public static function ignored(string $eventType, ?string $message = 'Event ignored', array $payload = []): self
+    public static function ignored(string $eventType, ?string $message = 'Event ignored', array $payload = [], ?string $eventId = null): self
     {
         return new self(
             isHandled: true,
             eventType: $eventType,
             message: $message,
             payload: $payload,
+            eventId: $eventId,
         );
     }
 
-    public static function failed(string $eventType, string $errorMessage, array $payload = []): self
+    public static function failed(string $eventType, string $errorMessage, array $payload = [], ?string $eventId = null): self
     {
         return new self(
             isHandled: false,
             eventType: $eventType,
             message: $errorMessage,
             payload: $payload,
+            eventId: $eventId,
         );
     }
 }

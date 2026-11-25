@@ -3,6 +3,7 @@
 namespace Modules\Payment\Models;
 
 use Illuminate\Database\Eloquent\Model;
+use Modules\Payment\Casts\EncryptedArray;
 
 class PaymentGatewayConfig extends Model
 {
@@ -13,7 +14,7 @@ class PaymentGatewayConfig extends Model
     protected $casts = [
         'is_active' => 'boolean',
         'is_test_mode' => 'boolean',
-        'settings' => 'array',
+        'settings' => EncryptedArray::class,
         'supported_currencies' => 'array',
         'sort_order' => 'integer',
     ];
